@@ -11,16 +11,19 @@ const DEFAULT_SOWS = ["SOW-001", "SOW-002", "SOW-003"];
 const HOUR_OPTIONS = Array.from({ length: 13 }, (_, i) => i); // 0-12 hours
 const MINUTE_OPTIONS = [0, 15, 30, 45];
 
-const emptyRow = () => ({
+const todayIso = () => new Date().toISOString().slice(0, 10);
+
+const emptyRow = (date = todayIso()) => ({
   id: crypto.randomUUID(),
   client: "",
   sowNo: "",
   changeRequestNo: "",
   setTime: "",
   workedItemDetails: "",
+  date,
 });
 
-export default function InlineGridForm({ initialRows = [] }) {
+export default function InlineGridForm({ initialRows = [], selectedDate = null, onRowsChange = null }) {
   const STORAGE_KEY = "wm_inline_rows_v1";
   const [rows, setRows] = useState(() => {
     try {
@@ -32,7 +35,9 @@ export default function InlineGridForm({ initialRows = [] }) {
     } catch {
       // ignore parse errors and fall back
     }
-    return initialRows.length ? initialRows : [emptyRow()];
+    // Ensure rows have a date field
+    const baseRows = initialRows.length ? initialRows : [emptyRow()];
+    return baseRows.map((r) => ({ ...(r || {}), date: r?.date ?? todayIso() }));
   });
   
 //   const commitDraft = () => {
@@ -54,7 +59,26 @@ export default function InlineGridForm({ initialRows = [] }) {
     return { hours: h, minutes: m };
   };
 
+  const computeTotalMinutes = (list) => {
+    return list.reduce((acc, r) => {
+      try {
+        const { hours, minutes } = parseTime(r?.setTime ?? "");
+        return acc + (hours * 60 + minutes);
+      } catch {
+        return acc;
+      }
+    }, 0);
+  };
+
+  const formatTotal = (minutes) => {
+    const h = Math.floor(minutes / 60);
+    const m = minutes % 60;
+    return `${h}h ${m}m`;
+  };
+
   const tableRef = useRef(null);
+  const PAGE_SIZE = 5;
+  const [page, setPage] = useState(1);
 
   const startRowEdit = (row) => {
     if (editingId && editingId !== row.id) {
@@ -75,12 +99,22 @@ export default function InlineGridForm({ initialRows = [] }) {
 
   const saveEdit = useCallback(() => {
     if (!draft) return;
-    setRows((prev) => prev.map((r) => (r.id === draft.id ? draft : r)));
+    setRows((prev) => {
+      const next = prev.map((r) => (r.id === draft.id ? draft : r));
+      if (onRowsChange) onRowsChange(next);
+      return next;
+    });
     cancelEdit();
   }, [draft]);
 
   const deleteRow = (id) => {
-    setRows((prev) => prev.filter((r) => r.id !== id));
+    setRows((prev) => {
+      const next = prev.filter((r) => r.id !== id);
+      const totalPages = Math.max(1, Math.ceil(next.length / PAGE_SIZE));
+      setPage((cur) => Math.min(cur, totalPages));
+      if (onRowsChange) onRowsChange(next);
+      return next;
+    });
   };
 
   const duplicateRow = (source) => {
@@ -88,12 +122,24 @@ export default function InlineGridForm({ initialRows = [] }) {
       ...source,
       id: crypto.randomUUID(),
     };
-    setRows((prev) => [...prev, copy]);
+    setRows((prev) => {
+      const next = [...prev, copy];
+      const totalPages = Math.max(1, Math.ceil(next.length / PAGE_SIZE));
+      setPage(totalPages);
+      if (onRowsChange) onRowsChange(next);
+      return next;
+    });
   };
 
   const addRow = () => {
-    const row = emptyRow();
-    setRows((prev) => [...prev, row]);
+    const row = emptyRow(selectedDate ?? todayIso());
+    setRows((prev) => {
+      const next = [...prev, row];
+      const totalPages = Math.max(1, Math.ceil(next.length / PAGE_SIZE));
+      setPage(totalPages);
+      if (onRowsChange) onRowsChange(next);
+      return next;
+    });
     setEditingId(row.id);
     setDraft({ ...row });
   };
@@ -119,9 +165,17 @@ export default function InlineGridForm({ initialRows = [] }) {
     if (editingId === detailsFor && draft) {
       const updated = { ...draft, workedItemDetails: detailsValue };
       setDraft(updated);
-      setRows((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+      setRows((prev) => {
+        const next = prev.map((r) => (r.id === updated.id ? updated : r));
+        if (onRowsChange) onRowsChange(next);
+        return next;
+      });
     } else {
-      setRows((prev) => prev.map((r) => (r.id === detailsFor ? { ...r, workedItemDetails: detailsValue } : r)));
+      setRows((prev) => {
+        const next = prev.map((r) => (r.id === detailsFor ? { ...r, workedItemDetails: detailsValue } : r));
+        if (onRowsChange) onRowsChange(next);
+        return next;
+      });
     }
     setDetailsOpen(false);
     setDetailsFor(null);
@@ -144,10 +198,21 @@ export default function InlineGridForm({ initialRows = [] }) {
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(rows));
+      if (onRowsChange) onRowsChange(rows);
     } catch {
         console.error("Failed to save rows to localStorage");
     }
   }, [rows]);
+
+  // If selectedDate changes, ensure there's at least one row for that date for quick entry
+  useEffect(() => {
+    if (!selectedDate) return;
+    const exists = rows.some((r) => (r.date ?? todayIso()) === selectedDate);
+    if (!exists) {
+      const r = emptyRow(selectedDate);
+      setRows((prev) => [...prev, r]);
+    }
+  }, [selectedDate]);
 
   return (
     <div className="p-4" ref={tableRef}>
@@ -164,116 +229,124 @@ export default function InlineGridForm({ initialRows = [] }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200 bg-white">
-            {rows.map((row) => {
-              const isEditing = editingId === row.id;
-              const clientForSows = (isEditing ? (draft?.client ?? row.client) : row.client) || "";
-              const sowOptions = SOW_BY_CLIENT[clientForSows] || DEFAULT_SOWS;
-              const { hours, minutes } = parseTime(isEditing ? (draft?.setTime ?? "") : (row.setTime ?? ""));
-              return (
-                <tr key={row.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-2">
-                    <select
-                      className="w-44 rounded border border-gray-300 px-2 py-1 text-sm focus:border-indigo-500 focus:outline-none"
-                      value={isEditing ? (draft?.client ?? "") : (row.client ?? "")}
-                      onFocus={() => startRowEdit(row)}
-                      onChange={(e) => {
-                        if (!isEditing) startRowEdit(row);
-                        onDraftChange("client", e.target.value);
-                      }}
-                    >
-                      <option value="" disabled>Select client</option>
-                      {CLIENT_OPTIONS.map((c) => (
-                        <option key={c} value={c}>{c}</option>
-                      ))}
-                    </select>
-                  </td>
-                  <td className="px-4 py-2">
-                    <select
-                      className="w-40 rounded border border-gray-300 px-2 py-1 text-sm focus:border-indigo-500 focus:outline-none"
-                      value={isEditing ? (draft?.sowNo ?? "") : (row.sowNo ?? "")}
-                      onFocus={() => startRowEdit(row)}
-                      onChange={(e) => {
-                        if (!isEditing) startRowEdit(row);
-                        onDraftChange("sowNo", e.target.value);
-                      }}
-                    >
-                      <option value="" disabled>Select SOW</option>
-                      {sowOptions.map((s) => (
-                        <option key={s} value={s}>{s}</option>
-                      ))}
-                    </select>
-                  </td>
-                  <td className="px-4 py-2">
-                    <input
-                      className="w-44 rounded border border-gray-300 px-2 py-1 text-sm focus:border-indigo-500 focus:outline-none"
-                      value={isEditing ? (draft?.changeRequestNo ?? "") : (row.changeRequestNo ?? "")}
-                      onFocus={() => startRowEdit(row)}
-                      onChange={(e) => {
-                        if (!isEditing) startRowEdit(row);
-                        onDraftChange("changeRequestNo", e.target.value);
-                      }}
-                      placeholder="Enter CR number"
-                    />
-                  </td>
-                  <td className="px-4 py-2">
-                    <div className="flex items-center gap-2">
+            {(() => {
+              const filtered = rows.filter((r) => (r.date ?? todayIso()) === (selectedDate ?? todayIso()));
+              const total = filtered.length;
+              const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+              if (page > totalPages) setPage(totalPages);
+              const start = (page - 1) * PAGE_SIZE;
+              const visible = filtered.slice(start, start + PAGE_SIZE);
+              return visible.map((row) => {
+                const isEditing = editingId === row.id;
+                const clientForSows = (isEditing ? (draft?.client ?? row.client) : row.client) || "";
+                const sowOptions = SOW_BY_CLIENT[clientForSows] || DEFAULT_SOWS;
+                const { hours, minutes } = parseTime(isEditing ? (draft?.setTime ?? "") : (row.setTime ?? ""));
+                return (
+                  <tr key={row.id} className="hover:bg-gray-50">
+                    <td className="px-4 py-2">
                       <select
-                        className="w-24 rounded border border-gray-300 px-2 py-1 text-sm focus:border-indigo-500 focus:outline-none"
-                        value={hours}
+                        className="w-44 rounded border border-gray-300 px-2 py-1 text-sm focus:border-indigo-500 focus:outline-none"
+                        value={isEditing ? (draft?.client ?? "") : (row.client ?? "")}
                         onFocus={() => startRowEdit(row)}
                         onChange={(e) => {
-                          const h = parseInt(e.target.value, 10) || 0;
-                          const m = minutes;
                           if (!isEditing) startRowEdit(row);
-                          onDraftChange("setTime", formatTime(h, m));
+                          onDraftChange("client", e.target.value);
                         }}
                       >
-                        {HOUR_OPTIONS.map((h) => (
-                          <option key={h} value={h}>{h}h</option>
+                        <option value="" disabled>Select client</option>
+                        {CLIENT_OPTIONS.map((c) => (
+                          <option key={c} value={c}>{c}</option>
                         ))}
                       </select>
+                    </td>
+                    <td className="px-4 py-2">
                       <select
-                        className="w-24 rounded border border-gray-300 px-2 py-1 text-sm focus:border-indigo-500 focus:outline-none"
-                        value={minutes}
+                        className="w-40 rounded border border-gray-300 px-2 py-1 text-sm focus:border-indigo-500 focus:outline-none"
+                        value={isEditing ? (draft?.sowNo ?? "") : (row.sowNo ?? "")}
                         onFocus={() => startRowEdit(row)}
                         onChange={(e) => {
-                          const h = hours;
-                          const m = parseInt(e.target.value, 10) || 0;
                           if (!isEditing) startRowEdit(row);
-                          onDraftChange("setTime", formatTime(h, m));
+                          onDraftChange("sowNo", e.target.value);
                         }}
                       >
-                        {MINUTE_OPTIONS.map((m) => (
-                          <option key={m} value={m}>{m}m</option>
+                        <option value="" disabled>Select SOW</option>
+                        {sowOptions.map((s) => (
+                          <option key={s} value={s}>{s}</option>
                         ))}
                       </select>
-                    </div>
-                  </td>
-                  <td className="px-4 py-2">
-                    <div className="flex items-center gap-3">
-                      <button onClick={() => openDetails(row)}>
-                        <BsPencilSquare className="h-5 w-5" />
-                      </button>
-                      <span className="text-sm text-gray-900">
-                        {truncate(isEditing ? (draft?.workedItemDetails ?? "") : row.workedItemDetails)}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-2">
-                    <div className="flex justify-end gap-2">
-                      <button onClick={() => duplicateRow(row)}>
-                        <BsClipboard2 className="h-5 w-5 text-blue-600 hover:text-blue-800" />
-                      </button>
-                      <button onClick={() => deleteRow(row.id)}>
-                        <BsFillTrashFill className="h-5 w-5 text-red-600 hover:text-red-800" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
+                    </td>
+                    <td className="px-4 py-2">
+                      <input
+                        className="w-44 rounded border border-gray-300 px-2 py-1 text-sm focus:border-indigo-500 focus:outline-none"
+                        value={isEditing ? (draft?.changeRequestNo ?? "") : (row.changeRequestNo ?? "")}
+                        onFocus={() => startRowEdit(row)}
+                        onChange={(e) => {
+                          if (!isEditing) startRowEdit(row);
+                          onDraftChange("changeRequestNo", e.target.value);
+                        }}
+                        placeholder="Enter CR number"
+                      />
+                    </td>
+                    <td className="px-4 py-2">
+                      <div className="flex items-center gap-2">
+                        <select
+                          className="w-24 rounded border border-gray-300 px-2 py-1 text-sm focus:border-indigo-500 focus:outline-none"
+                          value={hours}
+                          onFocus={() => startRowEdit(row)}
+                          onChange={(e) => {
+                            const h = parseInt(e.target.value, 10) || 0;
+                            const m = minutes;
+                            if (!isEditing) startRowEdit(row);
+                            onDraftChange("setTime", formatTime(h, m));
+                          }}
+                        >
+                          {HOUR_OPTIONS.map((h) => (
+                            <option key={h} value={h}>{h}h</option>
+                          ))}
+                        </select>
+                        <select
+                          className="w-24 rounded border border-gray-300 px-2 py-1 text-sm focus:border-indigo-500 focus:outline-none"
+                          value={minutes}
+                          onFocus={() => startRowEdit(row)}
+                          onChange={(e) => {
+                            const h = hours;
+                            const m = parseInt(e.target.value, 10) || 0;
+                            if (!isEditing) startRowEdit(row);
+                            onDraftChange("setTime", formatTime(h, m));
+                          }}
+                        >
+                          {MINUTE_OPTIONS.map((m) => (
+                            <option key={m} value={m}>{m}m</option>
+                          ))}
+                        </select>
+                      </div>
+                    </td>
+                    <td className="px-4 py-2">
+                      <div className="flex items-center gap-3">
+                        <button onClick={() => openDetails(row)}>
+                          <BsPencilSquare className="h-5 w-5" />
+                        </button>
+                        <span className="text-sm text-gray-900">
+                          {truncate(isEditing ? (draft?.workedItemDetails ?? "") : row.workedItemDetails)}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-2">
+                      <div className="flex justify-end gap-2">
+                        <button onClick={() => duplicateRow(row)}>
+                          <BsClipboard2 className="h-5 w-5 text-blue-600 hover:text-blue-800" />
+                        </button>
+                        <button onClick={() => deleteRow(row.id)}>
+                          <BsFillTrashFill className="h-5 w-5 text-red-600 hover:text-red-800" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              });
+            })()}
             <tr className="bg-gray-50">
-              <td className="px-4 py-2">
+              <td className="px-4 py-2" colSpan={6}>
                 <div className="flex justify-start">
                   <button
                     className="rounded bg-green-600 px-3 py-1 text-sm font-medium text-white hover:bg-green-700"
@@ -286,6 +359,59 @@ export default function InlineGridForm({ initialRows = [] }) {
             </tr>
           </tbody>
         </table>
+      </div>
+
+      {/* Pagination controls */}
+      <div className="mt-3 flex items-center justify-between">
+        <div className="text-sm text-gray-600">
+          {rows.filter((r) => (r.date ?? todayIso()) === (selectedDate ?? todayIso())).length === 0 ? (
+            "No entries"
+          ) : (
+            (() => {
+              const start = (page - 1) * PAGE_SIZE + 1;
+              const filteredCount = rows.filter((r) => (r.date ?? todayIso()) === (selectedDate ?? todayIso())).length;
+              const end = Math.min(filteredCount, page * PAGE_SIZE);
+              return `Showing ${start}-${end} of ${filteredCount}`;
+            })()
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            className="rounded border px-2 py-1 text-sm disabled:opacity-60"
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page <= 1}
+          >
+            Prev
+          </button>
+          {(() => {
+            const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+            const pages = Array.from({ length: totalPages }, (_, i) => i + 1);
+            return pages.map((p) => (
+              <button
+                key={p}
+                className={`rounded px-2 py-1 text-sm ${p === page ? "bg-indigo-600 text-white" : "border"}`}
+                onClick={() => setPage(p)}
+              >
+                {p}
+              </button>
+            ));
+          })()}
+          <button
+            className="rounded border px-2 py-1 text-sm disabled:opacity-60"
+            onClick={() => setPage((p) => p + 1)}
+            disabled={page >= Math.max(1, Math.ceil(rows.length / PAGE_SIZE))}
+          >
+            Next
+          </button>
+        </div>
+      </div>
+
+      {/* Total hours - bottom right (for selected date) */}
+      <div className="mt-3 flex justify-end">
+        <div className="inline-flex items-center gap-3 rounded border border-indigo-200 bg-indigo-50 px-4 py-2">
+          <div className="text-xs text-indigo-600">Total</div>
+          <div className="text-lg font-semibold text-indigo-900">{formatTotal(computeTotalMinutes(rows.filter((r) => (r.date ?? todayIso()) === (selectedDate ?? todayIso()))))}</div>
+        </div>
       </div>
 
       {detailsOpen && (
